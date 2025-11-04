@@ -42,13 +42,33 @@ THERMOSTAT_NAME="Downstairs"   # <-- change the friendly name as desired
 
 # Common helper function to read config
 read_conf_value() {
-  python3 - <<PY
-import json,sys
-j=json.load(open('$CONF_FILE'))
-key='$1'
-if key in j:
-    print(j[key])
-else:
+  local key="$1"
+  CONF_FILE_ENV="$CONF_FILE" KEY_ENV="$key" python3 - <<PY
+import json,sys,os
+try:
+    conf_file = os.environ['CONF_FILE_ENV']
+    key = os.environ['KEY_ENV']
+    if not os.path.exists(conf_file):
+        print(f"Config file not found: {conf_file}", file=sys.stderr)
+        sys.exit(3)
+    with open(conf_file) as f:
+        content = f.read()
+        if not content.strip():
+            print(f"Config file is empty: {conf_file}", file=sys.stderr)
+            sys.exit(3)
+        j = json.loads(content)
+    if key in j:
+        print(j[key])
+    else:
+        sys.exit(3)
+except KeyError as e:
+    print(f"Missing environment variable: {e}", file=sys.stderr)
+    sys.exit(3)
+except json.JSONDecodeError as e:
+    print(f"JSON decode error: {e}", file=sys.stderr)
+    sys.exit(3)
+except Exception as e:
+    print(f"Unexpected error: {e}", file=sys.stderr)
     sys.exit(3)
 PY
 }
@@ -174,23 +194,21 @@ if [ "${1:-}" = "--get-current-mode" ]; then
   TARGET_ID="${THERMOSTAT_ID}"
 
   # Build JSON body to query the specific thermostat and request settings/runtime
-  BODY_JSON=$(python3 - <<PY
-import json
+  BODY_JSON=$(TARGET_ID_ENV="$TARGET_ID" python3 - <<PY
+import json,os
+target_id = os.environ['TARGET_ID_ENV']
 print(json.dumps({
   "selection": {
     "selectionType": "thermostats",
-    "selectionMatch": "%s",
+    "selectionMatch": target_id,
     "includeSettings": True,
     "includeRuntime": True
   }
 }))
 PY
+)
   
-  BODY_ENC=$(python3 - <<PY
-import urllib.parse,sys
-print(urllib.parse.quote(sys.stdin.read()))
-PY
-<<< "$BODY_JSON")
+  BODY_ENC=$(echo "$BODY_JSON" | python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))')
 
   # Always silent for this probe (do not honor -v here)
   GET_CURL_ARGS=("${DEFAULT_CURL_ARGS[@]}")
@@ -239,11 +257,13 @@ except Exception:
     exit 6
   fi
 
-elif [ "${1:-}" = "--test-connection" ]; then
+fi
+
+if [ "${1:-}" = "--test-connection" ]; then
   # read tokens
   API_KEY=$(read_conf_value API_KEY)
   ACCESS_TOKEN=$(read_conf_value ACCESS_TOKEN)
-  REFRESH_TOKEN=$(read_conf_value REFRESH_TOKEN)
+  REFRESH_TOKEN=$(read_conf_value REFRESH_TOKEN) || REFRESH_TOKEN=""
 
   API_URL_BASE="https://api.ecobee.com/1"
   
@@ -261,26 +281,39 @@ PY
 )
 
   # URL-encode the body
-  BODY_ENC=$(python3 - <<PY
-import urllib.parse,sys
-print(urllib.parse.quote(sys.stdin.read()))
-PY
-<<< "$BODY_JSON")
+  BODY_ENC=$(echo "$BODY_JSON" | python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))')
 
   url="${API_URL_BASE}/thermostat?format=json&body=${BODY_ENC}"
   # For test-connection, allow verbose output when requested
   TEST_CURL_ARGS=("${DEFAULT_CURL_ARGS[@]}")
   if [ "$VERBOSE" -eq 1 ]; then TEST_CURL_ARGS=(-v); fi
-  response=$(curl "${TEST_CURL_ARGS[@]}" \
+  
+  # Use a temp file to capture both response and HTTP code
+  tmp_file=$(mktemp)
+  http_code=$(curl "${TEST_CURL_ARGS[@]}" \
     -H "Content-Type: text/json" \
     -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    "$url") || response=""
+    "$url" \
+    -o "$tmp_file" \
+    -w "%{http_code}") || http_code="000"
+  response=$(cat "$tmp_file" 2>/dev/null || true)
+  rm -f "$tmp_file"
   
-  if echo "$response" | jq -e . >/dev/null 2>&1; then
-    if [ "$(echo "$response" | jq -r '.status.code')" = "0" ]; then
-      echo "$response" | python3 - <<PY
-import sys,json
-j=json.load(sys.stdin)
+  # Only try to parse JSON if we have a successful HTTP response and non-empty body
+  if [ "$http_code" = "200" ] && [ -n "${response//[[:space:]]/}" ] && echo "$response" | jq -e . >/dev/null 2>&1; then
+    status_code=$(echo "$response" | jq -r '.status.code // empty' 2>/dev/null)
+    if [ -n "$status_code" ] && [ "$status_code" = "0" ]; then
+      RESPONSE_ENV="$response" python3 - <<PY
+import sys,json,os
+response = os.environ.get('RESPONSE_ENV', '')
+try:
+    if not response or not response.strip():
+        print("Error: Empty response received", file=sys.stderr)
+        sys.exit(1)
+    j=json.loads(response)
+except json.JSONDecodeError as e:
+    print(f"Error parsing JSON: {e}", file=sys.stderr)
+    sys.exit(1)
 thermostats = j.get('thermostatList', [])
 if not thermostats:
     print("No thermostats found.")
