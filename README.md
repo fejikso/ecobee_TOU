@@ -52,7 +52,7 @@ chmod 600 ecobee.conf
 
 ## **How the script works (important notes)**
 
-* The script currently has the thermostat identifier hard-coded to the **Downstairs** thermostat (ID 421872778226). You should **change this** in the script's source.  
+* The script currently has the thermostat identifier hard-coded to the **Downstairs** thermostat (placeholder ID 123456789). You should **change this** in the script's source.  
 * Modes accepted by the script (case-insensitive): HEAT, OFF, AUX, COOL, AUTO.  
   * **AUX maps to Ecobee's auxHeatOnly setting.**  
 * The script supports a safe **dry-run mode**: \--dry-run (or \-n) prints the JSON payload that would be sent without making network calls.  
